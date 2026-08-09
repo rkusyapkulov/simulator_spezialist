@@ -741,7 +741,7 @@ bool MapVirtualKeyToSpec(UINT vkCode, int& out_row, int& out_col) {
 bool MapVirtualKeyToSpec(UINT vkCode, int& out_row, int& out_col) {
     switch (vkCode) {
         // --- ЦИФРОВОЙ РЯД (Остается стандартным) ---
-    case 0xBB: out_row = 4; out_col = 11; return true; // ; +
+    case 0xBB: out_row = 3; out_col = 3; return true; // ; +
     case '1':  out_row = 4; out_col = 10; return true; // 1 !
     case '2':  out_row = 4; out_col = 9;  return true; // 2 "
     case '3':  out_row = 4; out_col = 8;  return true; // 3 #
@@ -752,7 +752,7 @@ bool MapVirtualKeyToSpec(UINT vkCode, int& out_row, int& out_col) {
     case '8':  out_row = 4; out_col = 3;  return true; // 8 (
     case '9':  out_row = 4; out_col = 2;  return true; // 9 )
     case '0':  out_row = 4; out_col = 1;  return true; // 0
-    case 0xBD: out_row = 4; out_col = 0;  return true; // - =
+    case 0xBD: out_row = 1; out_col = 1;  return true; // - =
 
         // --- ЛАТИНСКИЕ БУКВЫ A-Z (Маппинг "Буква в Букву" для Специалиста) ---
     case 'A':  out_row = 2; out_col = 8;  return true; // A -> на позицию А / A
@@ -779,17 +779,19 @@ bool MapVirtualKeyToSpec(UINT vkCode, int& out_row, int& out_col) {
     case 'V':  out_row = 2; out_col = 2;  return true; // V -> на позицию Ж / V
     case 'W':  out_row = 2; out_col = 9;  return true; // W -> на позицию В / W
     case 'X':  out_row = 1; out_col = 5;  return true; // X -> на позицию Ь / X
-    case 'Y':  out_row = 2; out_col = 10; return true; // Y -> на позицию Ы / Y
-    case 'Z':  out_row = 3; out_col = 2;  return true; // Z -> на позицию З / Z
+    case 'Z':  out_row = 2; out_col = 10; return true; // Y -> на позицию Ы / Y
+    case 'Y':  out_row = 3; out_col = 2;  return true; // Z -> на позицию З / Z
 
         // --- СПЕЦИАЛЬНЫЕ СИМВОЛЫ И КЛАВИШИ ---
-    case 0xDB: out_row = 3; out_col = 4;  return true; // Клавиша [ -> на Ш / [
-    case 0xDD: out_row = 3; out_col = 3;  return true; // Клавиша ] -> на Щ / ]
-    case 0xBA: out_row = 3; out_col = 0;  return true; // Клавиша ; -> на : / *
-    case 0xDE: out_row = 2; out_col = 1;  return true; // Клавиша ' -> на Э
+    case 0xDB: out_row = 4; out_col = 0;  return true; // Клавиша [ -> на Ш / [
+    case 0xDD: out_row = 3; out_col = 0;  return true; // Клавиша ] -> на Щ / ]
+    case 0xBA: out_row = 3; out_col = 4;  return true; // Клавиша ; -> на : / *
+    case 0xDE: out_row = 1; out_col = 10;  return true; // Клавиша ' -> на Э
+    case 0xDC: out_row = 4; out_col = 11;  return true; // Клавиша ; -> на : / *
+    case 0xC0: out_row = 1; out_col = 3;  return true; // Клавиша ' -> на Э
     case 0xBC: out_row = 1; out_col = 2;  return true; // Клавиша , -> на , / <
     case 0xBE: out_row = 2; out_col = 0;  return true; // Клавиша . -> на . / >
-    case 0xBF: out_row = 1; out_col = 1;  return true; // Клавиша / -> на / / ?
+    case 0xBF: out_row = 2; out_col = 1;  return true; // Клавиша / -> на / / ?
     case VK_BACK: out_row = 1; out_col = 0; return true; // Backspace -> ЗБ
     }
     return false;
@@ -1030,8 +1032,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
             if (msg.message == WM_KEYDOWN) {
                 if (!(msg.lParam & (1 << 30))) { // Игнорируем автоповтор Windows
                     UINT vk = (UINT)msg.wParam;
+                    if (vk == VK_SHIFT) {
+                        UINT scanCode = (msg.lParam >> 16) & 0xFF;
+                        vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX); // Преобразует в VK_LSHIFT или VK_RSHIFT
+                    }
                     if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
-                        nr_button_pressed = true; // Привязываем Shift к кнопке "НР"
+                        nr_button_pressed = true;
                     }
                     else if (vk == VK_CONTROL) {
                         spec_key_matrix[0] &= ~(1 << 11);
@@ -1057,6 +1063,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
             // --- ОТПУСКАНИЕ ФИЗИЧЕСКИХ КЛАВИШ (WM_KEYUP) ---
             else if (msg.message == WM_KEYUP) {
                 UINT vk = (UINT)msg.wParam;
+                if (vk == VK_SHIFT) {
+                    UINT scanCode = (msg.lParam >> 16) & 0xFF;
+                    vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX);
+                }
                 if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
                     nr_button_pressed = false;
                 }

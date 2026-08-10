@@ -1033,13 +1033,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
                 if (!(msg.lParam & (1 << 30))) { // Игнорируем автоповтор Windows
                     UINT vk = (UINT)msg.wParam;
                     if (vk == VK_SHIFT) {
-                        UINT scanCode = (msg.lParam >> 16) & 0xFF;
-                        vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX); // Преобразует в VK_LSHIFT или VK_RSHIFT
-                    }
-                    if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
                         nr_button_pressed = true;
                     }
-                    else if (vk == VK_CONTROL) {
+                    else if (vk == VK_CAPITAL) {
                         spec_key_matrix[0] &= ~(1 << 11);
                     }
                     if (vk == VK_SPACE) { spec_key_matrix[0] &= ~(1 << 5); } // Пробел
@@ -1064,13 +1060,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
             else if (msg.message == WM_KEYUP) {
                 UINT vk = (UINT)msg.wParam;
                 if (vk == VK_SHIFT) {
-                    UINT scanCode = (msg.lParam >> 16) & 0xFF;
-                    vk = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX);
-                }
-                if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
                     nr_button_pressed = false;
                 }
-                else if (vk == VK_CONTROL) {
+                else if (vk == VK_CAPITAL) {
                     spec_key_matrix[0] |= (1 << 11);
                 }
                 if (vk == VK_SPACE) { spec_key_matrix[0] |= (1 << 5); }

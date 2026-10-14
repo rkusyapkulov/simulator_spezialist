@@ -17,6 +17,9 @@
 extern "C" int cpu8080_step(CPU8080* cpu);
 extern "C" void cpu8080_reset(CPU8080* cpu);
 
+#define SYSTEM_CLOCK_HZ 2000000
+
+
 // --- ПАРАМЕТРЫ ЭКРАНА ПК "СПЕЦИАЛИСТ" ---
 const int SPEC_SCREEN_WIDTH = 384;
 const int SPEC_SCREEN_HEIGHT = 256;
@@ -591,7 +594,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CreateWindowExW(0, L"BUTTON", L"СБРОС (RESET)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, RIGHT_PANEL_X, 20, 210, 40, hwnd, (HMENU)2000, hInst, NULL);
         hRegListBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", NULL, WS_CHILD | WS_VISIBLE | WS_VSCROLL, RIGHT_PANEL_X, 75, 210, 245, hwnd, (HMENU)2001, NULL, NULL);
 
-        LoadRoms();
         UpdateRegisterDisplay();
         return 0;
     }
@@ -604,9 +606,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND: {
         int btn_id = LOWORD(wp);
+        
         // Сброс эмулятора
         if (btn_id == 2000) {
-            LoadRoms();
+			Reset(&cpu);
             UpdateRegisterDisplay();
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
@@ -674,8 +677,11 @@ void FillAudioBuffer(short* buffer, int samplesCount) {
     }
 }
 
+// Флаг завершения: после waveOutReset колбэк получает WOM_DONE для всех буферов и не должен ставить их в очередь снова
+static volatile bool audio_closing = false;
+
 void CALLBACK WaveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
-    if (uMsg == WOM_DONE) {
+    if (uMsg == WOM_DONE && !audio_closing) {
         WAVEHDR* pHdr = (WAVEHDR*)dwParam1;
         FillAudioBuffer((short*)pHdr->lpData, AUDIO_BUF_SIZE);
         waveOutWrite(hwo, pHdr, sizeof(WAVEHDR));
@@ -685,6 +691,7 @@ void CALLBACK WaveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWO
 static double sound_accumulator = 0.0; // Сохраняет остаток тактов между кадрами
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
+    LoadRoms();
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
@@ -696,10 +703,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     HWND hwnd = CreateWindowExW(0, L"Specialist_Emulator_Core", L"Эмулятор ПК Специалист",
         WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 1080, 870, NULL, NULL, hInst, NULL);
-
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
+	// --- Инициализация звуковой подсистемы waveOut ---
     WAVEFORMATEX wfx = { 0 };
     wfx.wFormatTag = WAVE_FORMAT_PCM;
     wfx.nChannels = 1;
@@ -724,10 +731,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     LARGE_INTEGER frequency;
     LARGE_INTEGER last_hardware_time;
     double internal_cycles_debt = 0.0;
+    
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&last_hardware_time);
-
-    const double SYSTEM_CLOCK_HZ = 2000000.0; // Номинальная тактовая частота процессора Специалиста
 
     while (emulator_running) {
         MsgWaitForMultipleObjectsEx(0, NULL, 1, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -794,89 +800,84 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+
         if (!emulator_running) break;
 
+        // --- ДИСПЕТЧЕР И ТАКТОВАЯ СИНХРОНИЗАЦИЯ ЯДРА ---
         LARGE_INTEGER current_hardware_time;
         QueryPerformanceCounter(&current_hardware_time);
         double elapsed_seconds = (double)(current_hardware_time.QuadPart - last_hardware_time.QuadPart) / frequency.QuadPart;
 
-        if (elapsed_seconds > 0.1) elapsed_seconds = 0.1;
+        if (elapsed_seconds > 0.1) elapsed_seconds = 0.1; // Защита от лагов Windows
+
         if (elapsed_seconds > 0.0) {
             last_hardware_time = current_hardware_time;
+            internal_cycles_debt += elapsed_seconds * SYSTEM_CLOCK_HZ; // Накапливаем такты ПК
 
-            // Накапливаем такты, которые должен выполнить процессор
-            internal_cycles_debt += elapsed_seconds * SYSTEM_CLOCK_HZ;
-
-            // Ограничиваем максимальный долг (защита от "прыжка времени" при перетаскивании окна)
-            if (internal_cycles_debt > 80000.0) {
-                internal_cycles_debt = 40000.0;
-            }
-        }
-
-        // Выполняем ровно столько тактов, сколько накопилось в долге
-        if (internal_cycles_debt >= 4.0) { // Исполняем, если накопилось хотя бы на минимальную инструкцию
             int cycles_to_execute = (int)internal_cycles_debt;
-            int cycles_actually_executed = 0;
+            if (cycles_to_execute > 0) {
+                while (cycles_to_execute > 0) {
+                    int elapsed_ticks = cpu8080_step(&cpu);
 
-            while (cycles_actually_executed < cycles_to_execute) {
-                int elapsed_ticks = cpu8080_step(&cpu);
-                cycles_actually_executed += elapsed_ticks;
+                    cycles_to_execute -= elapsed_ticks;
+                    internal_cycles_debt -= elapsed_ticks;
 
-                // Звуковой аккумулятор считает по факту выполненных тактов
-                sound_accumulator += elapsed_ticks;
-                while (sound_accumulator >= 90.7029) {
-                    sound_accumulator -= 90.7029;
-                    short sample = spec_speaker_state ? 4000 : -4000;
-                    audio_ring_buffer[ring_write_ptr] = sample;
-                    ring_write_ptr = (ring_write_ptr + 1) % RING_BUF_SIZE;
-                }
-
-                // Кадровое прерывание (50 Гц)
-                cpu.cycles_until_interrupt -= elapsed_ticks;
-                if (cpu.cycles_until_interrupt <= 0) {
-                    cpu.cycles_until_interrupt += 40000; // Ровно 40 тыс тактов на кадр при 2 МГц
-
-                    // Синхронизация экранной кнопки НР
-                    HWND hCheckButtonHP = GetDlgItem(hwnd, 1060);
-                    if (hCheckButtonHP != NULL) {
-                        LRESULT curCheck = SendMessageW(hCheckButtonHP, BM_GETCHECK, 0, 0);
-                        if ((curCheck == BST_CHECKED) != nr_button_pressed) {
-                            SendMessageW(hCheckButtonHP, BM_SETCHECK, nr_button_pressed ? BST_CHECKED : BST_UNCHECKED, 0);
-                            InvalidateRect(hCheckButtonHP, NULL, TRUE);
-                        }
+                    // Звуковой аккумулятор считает по факту выполненных тактов
+                    sound_accumulator += elapsed_ticks;
+                    while (sound_accumulator >= 90.7029) {
+                        sound_accumulator -= 90.7029;
+                        short sample = spec_speaker_state ? 4000 : -4000;
+                        audio_ring_buffer[ring_write_ptr] = sample;
+                        ring_write_ptr = (ring_write_ptr + 1) % RING_BUF_SIZE;
                     }
 
-                    // Автоотжатие GUI кнопок мыши
-                    if (static_virtual_key_duration > 0) {
-                        static_virtual_key_duration--;
-                        if (static_virtual_key_duration == 0) {
-                            for (int i = 0; i < 6; i++) {
-                                spec_key_matrix[i] = 0xFFF;
+                    // Отсчитываем такты до кадрового прерывания 50 Гц
+                    cpu.cycles_until_interrupt -= elapsed_ticks;
+                    if (cpu.cycles_until_interrupt <= 0) {
+                        cpu.cycles_until_interrupt += 40000; // Ровно 40 тыс тактов на кадр при 2 МГц
+
+                        // Синхронизация экранной кнопки НР
+                        HWND hCheckButtonHP = GetDlgItem(hwnd, 1060);
+                        if (hCheckButtonHP != NULL) {
+                            LRESULT curCheck = SendMessageW(hCheckButtonHP, BM_GETCHECK, 0, 0);
+                            if ((curCheck == BST_CHECKED) != nr_button_pressed) {
+                                SendMessageW(hCheckButtonHP, BM_SETCHECK, nr_button_pressed ? BST_CHECKED : BST_UNCHECKED, 0);
+                                InvalidateRect(hCheckButtonHP, NULL, TRUE);
                             }
                         }
-                    }
 
-                    UpdateRegisterDisplay();
-                    InvalidateRect(hwnd, NULL, FALSE);
+                        // Автоотжатие GUI кнопок мыши
+                        if (static_virtual_key_duration > 0) {
+                            static_virtual_key_duration--;
+                            if (static_virtual_key_duration == 0) {
+                                for (int i = 0; i < 6; i++) {
+                                    spec_key_matrix[i] = 0xFFF;
+                                }
+                            }
+                        }
+
+                        // Обновляем графику и окна отладки строго 1 раз по завершении кадра
+                        UpdateRegisterDisplay();
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    }
                 }
             }
-
-            // Вычитаем из глобального долга только то, что РЕАЛЬНО успели выполнить
-            internal_cycles_debt -= cycles_actually_executed;
         }
-        else {
-            // Если процессор обогнал время или такты ещё не накопились,
-            // даём Windows отдохнуть (1 мс), разгружая CPU вашего ПК
-            Sleep(1);
-        }
-    } // Конец цикла while(emulator_running)
 
+        if (internal_cycles_debt <= 0.0) {
+            Sleep(1); // Освобождаем CPU ПК
+        }
+    }
+
+    // --- Безопасная очистка аудиодескрипторов перед выходом ---
     if (hWaveOut) {
+        audio_closing = true;    // колбэк больше не ставит буферы в очередь
+        waveOutReset(hWaveOut); // вернуть все буферы, иначе Unprepare/Close завершатся ошибкой
         for (int i = 0; i < 2; i++) {
             waveOutUnprepareHeader(hWaveOut, &waveHeader[i], sizeof(WAVEHDR));
             delete[] audioBuffers[i];
         }
         waveOutClose(hWaveOut);
     }
-    return (int)msg.wParam;
+    return (int)msg.wParam; 
 }

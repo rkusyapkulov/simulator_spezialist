@@ -343,7 +343,8 @@ void CreateKeyboardUI(HWND hwndParent, HINSTANCE hInst) {
         { L"ВК",    14, 1, 1070 }
     };
 
-    for (const auto& key : lower_keys) {
+	for (int i = 0; i < sizeof(lower_keys)/sizeof(LowerKey); i++) {
+		LowerKey key = lower_keys[i];
         int x = START_X + key.col_pos * (BTN_W + GAP);
         int w = BTN_W * key.width_multiplier + GAP * (key.width_multiplier - 1);
         DWORD button_style = WS_CHILD | WS_VISIBLE | BS_FLAT | BS_NOFOCUS;

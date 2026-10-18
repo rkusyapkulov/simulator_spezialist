@@ -2,17 +2,15 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
-#include <mmsystem.h>
-#include <fstream>
 #include <string>
-#include <vector>
-#include <cstdlib>
-#include <cwchar>
-#include <cmath>
 #include <commdlg.h>
 #include "8080.h"
 
+#pragma comment (lib, "libcmt.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment (lib, "User32.lib")
+#pragma comment (lib, "Gdi32.lib")
+#pragma comment (lib, "Comdlg32.lib")
 
 extern "C" int cpu8080_step(CPU8080* cpu);
 extern "C" void cpu8080_reset(CPU8080* cpu);
@@ -138,7 +136,7 @@ extern "C" uint8_t cpu8080_read(CPU8080* cpu, uint16_t addr) {
 
 // --- ДИСПЕТЧЕР ЗАПИСИ "СПЕЦИАЛИСТА" ---
 extern "C" void cpu8080_write(CPU8080* cpu, uint16_t addr, uint8_t val) {
-    if (addr >= 0xC000 && addr <= 0xCEFF) return; // ПЗУ защита
+    if (addr >= 0xC000 && addr <= 0xCFFF) return; // ПЗУ защита
 
     // Обработка системного ППА №2 (Включая зеркало 0xFF00-0xFF03)
     if ((addr >= 0xF800 && addr <= 0xFFFF) || (addr & 0xFFFC) == 0xFF00) {
@@ -186,11 +184,25 @@ CPU8080 cpu;
 
 // --- ЗАГРУЗКА И КОРРЕКТИРОВКА РОМОВ ---
 bool LoadRawBinaryFile(const wchar_t* filepath, BYTE* target_dest, size_t max_bytes) {
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file.is_open()) return false;
-    file.read(reinterpret_cast<char*>(target_dest), max_bytes);
-    file.close();
-    return true;
+    // Открываем файл через системные вызовы Windows
+    HANDLE hFile = CreateFileW(
+        filepath, 
+        GENERIC_READ, 
+        FILE_SHARE_READ, 
+        NULL, 
+        OPEN_EXISTING, 
+        FILE_ATTRIBUTE_NORMAL, 
+        NULL
+    );
+    
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    DWORD bytesRead = 0;
+    // Читаем бинарные данные напрямую в эмулируемую память
+    BOOL success = ReadFile(hFile, target_dest, (DWORD)max_bytes, &bytesRead, NULL);
+    
+    CloseHandle(hFile);
+    return success && (bytesRead > 0);
 }
 
 void LoadRoms() {
@@ -207,16 +219,23 @@ void LoadRoms() {
 
 void UpdateRegisterDisplay() {
     SendMessageW(hRegListBox, LB_RESETCONTENT, 0, 0);
-    wchar_t buf[64];
-    swprintf(buf, 64, L" PC: %04Xh SP: %04Xh", cpu.PC, cpu.SP);
+    
+    // Выделяем избыточный буфер в стеке во избежание переполнения строки
+    wchar_t buf[128];
+    
+    wsprintfW(buf, L" PC: %04Xh SP: %04Xh", cpu.PC, cpu.SP);
     SendMessageW(hRegListBox, LB_ADDSTRING, 0, (LPARAM)buf);
-    swprintf(buf, 64, L" REG A: %02Xh BC: %04Xh", cpu.A, (uint16_t)((cpu.B << 8) | cpu.C));
+    
+    wsprintfW(buf, L" REG A: %02Xh BC: %04Xh", cpu.A, (uint16_t)((cpu.B << 8) | cpu.C));
     SendMessageW(hRegListBox, LB_ADDSTRING, 0, (LPARAM)buf);
-    swprintf(buf, 64, L" REG DE: %04Xh HL: %04Xh", (uint16_t)((cpu.D << 8) | cpu.E), (uint16_t)((cpu.H << 8) | cpu.L));
+    
+    wsprintfW(buf, L" REG DE: %04Xh HL: %04Xh", (uint16_t)((cpu.D << 8) | cpu.E), (uint16_t)((cpu.H << 8) | cpu.L));
     SendMessageW(hRegListBox, LB_ADDSTRING, 0, (LPARAM)buf);
-    swprintf(buf, 64, L" Флаги: S:%d Z:%d AC:%d P:%d CY:%d", cpu.S, cpu.Z, cpu.AC, cpu.P, cpu.CY);
+    
+    wsprintfW(buf, L" Флаги: S:%d Z:%d AC:%d P:%d CY:%d", cpu.S, cpu.Z, cpu.AC, cpu.P, cpu.CY);
     SendMessageW(hRegListBox, LB_ADDSTRING, 0, (LPARAM)buf);
-    swprintf(buf, 64, L" Режим экрана: ЧБ 384x256");
+    
+    wsprintfW(buf, L" Режим экрана: ЧБ 384x256");
     SendMessageW(hRegListBox, LB_ADDSTRING, 0, (LPARAM)buf);
 }
 
@@ -513,57 +532,56 @@ bool MapVirtualKeyToSpec(UINT vkCode, int& out_row, int& out_col) {
 
 // Загрузка исполняемых образов программ Специалиста (.RKS или сырых .BIN)
 void LoadSpecFile(HWND hwnd) {
-    OPENFILENAMEW ofn;
+    OPENFILENAMEW ofn = { 0 }; // Обнуление средствами компилятора без memset
     wchar_t szFile[260] = { 0 };
-    ZeroMemory(&ofn, sizeof(ofn));
+    
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
     ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
+    ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
     ofn.lpstrFilter = L"Файлы Специалиста (*.rks;*.bin;*.spc)\0*.rks;*.bin;*.spc\0Все файлы (*.*)\0*.*\0";
     ofn.nFilterIndex = 1;
-    ofn.lpstrFileTitle = NULL;
-    ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
     if (GetOpenFileNameW(&ofn) == TRUE) {
-        std::ifstream file(ofn.lpstrFile, std::ios::binary);
-        if (!file.is_open()) {
+        HANDLE hFile = CreateFileW(ofn.lpstrFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
             MessageBoxW(hwnd, L"Не удалось открыть файл!", L"Ошибка", MB_OK | MB_ICONERROR);
             return;
         }
 
-        file.seekg(0, std::ios::end);
-        size_t file_size = file.tellg();
-        file.seekg(0, std::ios::beg);
+        LARGE_INTEGER fileSize;
+        GetFileSizeEx(hFile, &fileSize);
+        size_t file_size = (size_t)fileSize.QuadPart;
 
         WORD load_address = 0x0000;
         WORD file_length = 0;
         bool has_rks_header = false;
+        DWORD bytesRead = 0;
 
         // Валидация стандартного RKS контейнера (2 байта старта, 2 байта конца)
         if (file_size >= 4) {
             BYTE header[4];
-            file.read(reinterpret_cast<char*>(header), 4);
-            WORD start_addr = header[0] | (header[1] << 8);
-            WORD end_addr = header[2] | (header[3] << 8);
+            if (ReadFile(hFile, header, 4, &bytesRead, NULL) && bytesRead == 4) {
+                WORD start_addr = header[0] | (header[1] << 8);
+                WORD end_addr = header[2] | (header[3] << 8);
 
-            if (end_addr >= start_addr && (size_t)(end_addr - start_addr + 5) <= file_size) {
-                load_address = start_addr;
-                file_length = end_addr - start_addr + 1;
-                has_rks_header = true;
+                if (end_addr >= start_addr && (size_t)(end_addr - start_addr + 5) <= file_size) {
+                    load_address = start_addr;
+                    file_length = end_addr - start_addr + 1;
+                    has_rks_header = true;
+                }
             }
         }
 
         if (!has_rks_header) {
-            file.seekg(0, std::ios::beg);
+            SetFilePointer(hFile, 0, NULL, FILE_BEGIN); // Перемотка в начало, аналог seekg
             load_address = 0x0000;
             file_length = (file_size > 0x9000) ? 0x9000 : (WORD)file_size;
         }
 
-        file.read(reinterpret_cast<char*>(&spec_ram[load_address]), file_length);
-        file.close();
+        ReadFile(hFile, &spec_ram[load_address], file_length, &bytesRead, NULL);
+        CloseHandle(hFile);
 
         // Инициализация CPU для запуска программы
         Reset(&cpu);
@@ -574,7 +592,7 @@ void LoadSpecFile(HWND hwnd) {
         InvalidateRect(hwnd, NULL, FALSE);
 
         wchar_t msg_buf[256];
-        swprintf(msg_buf, 256, L"Файл успешно загружен!\nАдрес старта: %04Xh\nРазмер кода: %d байт", load_address, file_length);
+        wsprintfW(msg_buf, L"Файл успешно загружен!\nАдрес старта: %04Xh\nРазмер кода: %d байт", load_address, file_length);
         MessageBoxW(hwnd, msg_buf, L"Успех", MB_OK | MB_ICONINFORMATION);
     }
 }
